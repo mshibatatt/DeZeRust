@@ -1,4 +1,5 @@
 pub mod DeZeRust {
+    use std::borrow::BorrowMut;
     use std::collections::{BinaryHeap, HashSet};
     use std::rc::{Rc, Weak};
     use std::cell::RefCell;
@@ -7,7 +8,7 @@ pub mod DeZeRust {
     type Dtype = f64;
     type Grad = Option<Variable>;
     static mut ENABLE_BACKPROP: bool = true;
-    static mut RETAIN_GRAD: bool = true;
+    static mut RETAIN_GRAD: bool = false;
     static mut CREATE_SECOND_GRAPH: bool = true;
 
     unsafe fn config_backprop_on() {
@@ -93,7 +94,7 @@ pub mod DeZeRust {
             let mut que = BinaryHeap::new();
 
             let v = self.clone();
-            let creator = &v.0.borrow().creator;
+            let creator = &v.0.borrow().creator.clone();
             if let Some(f) = creator {
                 let listed_f = f.clone();
                 que.push(listed_f);
@@ -125,14 +126,13 @@ pub mod DeZeRust {
                             seen.insert(seen_g.0.as_ptr());
                         }
                     }
-                }
+                } 
 
                 if unsafe { CREATE_SECOND_GRAPH } & unsafe { !ENABLE_BACKPROP } {
                     unsafe { config_backprop_on(); } 
                }
 
                 if unsafe { !RETAIN_GRAD } {
-                    // TODO: Fix runtime error in borrow mut
                     for y in f.0.borrow().output.iter() {
                         y.upgrade().unwrap().as_ref().borrow_mut().clear_grad();
                     }
@@ -552,26 +552,26 @@ pub mod DeZeRust {
         
         #[test]
         fn test_backward_8() {
-            // unsafe { config_retain_on() };
             let x = Variable::new(3.0);
             let y = square(x.clone());
             let z = square(y.clone());
             z.backward();
             assert_eq!(x.get_grad_data(), Some(108.0));
-            assert_eq!(y.get_grad_data(), Some(18.0));
-            // unsafe { config_retain_off() };
+            if unsafe { RETAIN_GRAD } {
+                assert_eq!(y.get_grad_data(), Some(18.0));
+            } else {
+                assert_eq!(y.get_grad_data(), None);
+            }
         }
 
         #[test]
         fn test_backward_13() {
-            // unsafe { config_retain_on() };
             let (x, y) = (Variable::new(2.0), Variable::new(3.0));
             let z = add(square(x.clone()), square(y.clone()));
             z.backward();
             assert_eq!(z.get_data(), 13.0);
             assert_eq!(x.get_grad_data(), Some(4.0));
             assert_eq!(y.get_grad_data(), Some(6.0));
-            // unsafe { config_retain_off() };
         }
 
         #[test]
