@@ -1,5 +1,4 @@
 pub mod DeZeRust {
-    use std::borrow::BorrowMut;
     use std::collections::{BinaryHeap, HashSet};
     use std::rc::{Rc, Weak};
     use std::cell::RefCell;
@@ -83,6 +82,10 @@ pub mod DeZeRust {
 
         pub fn clear_grad(&self) {
             self.0.as_ref().borrow_mut().grad = None;
+        }
+
+        pub fn set_data(&self, x: Dtype) {
+            self.0.as_ref().borrow_mut().data = x;
         }
 
         pub fn backward(&self) {
@@ -177,7 +180,7 @@ pub mod DeZeRust {
     }
 
 
-    #[derive(Clone)]
+    #[derive(Clone, Debug)]
     enum FunctionTypes {
         None,
         ADD,
@@ -629,10 +632,12 @@ pub mod DeZeRust {
             let y = f(x.clone());
             y.set_name("y");
             y.backward();
+            dot_graph::plot_dot_graph(&y, "second".to_owned());
             assert_eq!(x.get_grad_data(), Some(24.0));
 
             let gx = x.get_grad().unwrap();
             gx.set_name("gx");
+            dot_graph::plot_dot_graph(&gx, "second_d".to_owned());
             x.clear_grad();
             gx.backward();
             assert_eq!(x.get_grad_data(), Some(44.0));
@@ -646,9 +651,101 @@ pub mod DeZeRust {
 
     }
 
+    mod dot_graph {
+        use crate::DeZeRust::*;
+        use std::collections::{BinaryHeap, HashSet};
+        use std::fs::File;
+        use std::io::prelude::*;
+        use std::path::Path;
+        use std::process::Command;
 
+        fn dot_var(v: &Variable) -> String {
+            let mut dot_var_txt = format!("{}", v.0.as_ptr() as usize);
+            dot_var_txt += &format!(" [label=\"{}\"", v.get_name());
+            dot_var_txt += ", color=orange, style=filled]\n";
+            dot_var_txt
+        }
+
+        fn dot_func(f: &Function) -> String {
+            let mut dot_func_txt = format!("{}", f.0.as_ptr() as usize);
+            dot_func_txt += &format!(" [label=\"{:?}\"", f.0.borrow().ftype);
+            dot_func_txt += ", color=lightblue, style=filled, shape=box]\n";
+
+            for x in f.0.borrow().input.iter() {
+                dot_func_txt += &format!("{} -> {}\n", x.0.as_ref().as_ptr() as usize, f.0.as_ptr() as usize);
+            }
+            for y in f.0.borrow().output.iter() {
+                dot_func_txt += &format!("{} -> {}\n", f.0.as_ptr() as usize, y.upgrade().unwrap().as_ptr() as usize);
+            }
+            dot_func_txt
+        }
+
+        fn get_dot_graph(v: &Variable) -> String {
+            let mut txt = String::from("digraph g {\n ");
+            let mut seen = HashSet::new();
+            let mut que = BinaryHeap::new();
+
+            let creator = &v.0.borrow().creator.clone();
+            if let Some(f) = creator {
+                let listed_f = f.clone();
+                que.push(listed_f);
+                let seen_f = f.clone();
+                seen.insert(seen_f.0.as_ptr());
+            }
+            txt += &dot_var(v);
+
+            while !que.is_empty() {
+                let f = que.pop().unwrap();
+                txt += &dot_func(&f);
+                let x_back = &f.0.borrow().input;
+
+                for x in x_back.iter() {
+                    txt += &dot_var(x);
+                    let x_temp = x.0.borrow();
+                    let nxt_creator = x_temp.creator.as_ref(); 
+                    if let Some(g) = nxt_creator {
+                        if !seen.contains(&g.0.as_ptr()) {
+                            let listed_g = g.clone();
+                            que.push(listed_g);
+                            let seen_g = g.clone();
+                            seen.insert(seen_g.0.as_ptr());
+                        }
+                    }
+                } 
+            }
+
+            txt += "}";
+            txt
+        }
+
+        pub fn plot_dot_graph(v: &Variable, to_file: String) {
+            let txt = get_dot_graph(v);
+
+            // write dot file
+            let mut dot_file_name = to_file.to_owned();
+            dot_file_name += ".dot";
+            let dot_file = Path::new(&dot_file_name);
+            let mut outfile = match File::create(&dot_file) {
+                Err(why) => panic!("couldn't create {}: {}", dot_file.display(), why),
+                Ok(outfile) => outfile,
+            };
+            match outfile.write_all(txt.as_bytes()) {
+                Err(why) => panic!("couldn't write to {}: {}", dot_file.display(), why),
+                Ok(_) =>println!("successfully write to {}", dot_file.display()),            
+            };
+
+            // call dot command
+            let mut png_file = to_file.to_owned();
+            png_file += ".png";
+            let output = Command::new("dot")
+                .args([&dot_file_name, "-T", "png", "-o" ,  &png_file])
+                .output()
+                .expect("failed to generate graph");
+            println!("graphviz process status: {}", output.status);
+        } 
+
+    }
 }
-
 
 mod base64 {
     pub(super) fn to_f64(data: &[u8]) -> Vec<f64> {

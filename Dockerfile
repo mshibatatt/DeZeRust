@@ -4,7 +4,7 @@ ENV SHELL /bin/bash
 ENV DEBIAN_FRONTEND noninteractive
 
 RUN apt-get update && apt-get install -y \
-    cmake git wget curl && \
+    cmake git wget curl graphviz && \
     # install Rust
     curl https://sh.rustup.rs -sSf | sh -s -- -y && \
     chmod -R +rx /root && \ 
