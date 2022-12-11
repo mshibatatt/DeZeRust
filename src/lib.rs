@@ -612,11 +612,16 @@ pub mod DeZeRust {
                         36.0*x.clone()*y.clone() + 27.0*y.clone().square()))
             }
             let x = Variable::new(1.0);
+            x.set_name("x");
             let y = Variable::new(1.0);
+            y.set_name("y");
             let z = goldstein(x.clone(), y.clone());
+            z.set_name("z");
             z.backward();
             assert_eq!(x.get_grad_data(), Some(-5376.0));
             assert_eq!(y.get_grad_data(), Some(8064.0));
+
+            dot_graph::plot_dot_graph(&z, "golden".to_owned());
         }
 
         #[test]
@@ -654,6 +659,7 @@ pub mod DeZeRust {
     mod dot_graph {
         use crate::DeZeRust::*;
         use std::collections::{BinaryHeap, HashSet};
+        use std::fs;
         use std::fs::File;
         use std::io::prelude::*;
         use std::path::Path;
@@ -719,12 +725,17 @@ pub mod DeZeRust {
         }
 
         pub fn plot_dot_graph(v: &Variable, to_file: String) {
+            let temp_dir = Path::new("graph");
             let txt = get_dot_graph(v);
+            match fs::create_dir(temp_dir) {
+                Err(why) => println!("! {:?}", why.kind()),
+                Ok(_) => {},
+            };
 
             // write dot file
             let mut dot_file_name = to_file.to_owned();
             dot_file_name += ".dot";
-            let dot_file = Path::new(&dot_file_name);
+            let dot_file = temp_dir.join(&dot_file_name);
             let mut outfile = match File::create(&dot_file) {
                 Err(why) => panic!("couldn't create {}: {}", dot_file.display(), why),
                 Ok(outfile) => outfile,
@@ -737,8 +748,9 @@ pub mod DeZeRust {
             // call dot command
             let mut png_file = to_file.to_owned();
             png_file += ".png";
+            let png_file = temp_dir.join(&png_file);
             let output = Command::new("dot")
-                .args([&dot_file_name, "-T", "png", "-o" ,  &png_file])
+                .args([dot_file.to_str().unwrap(), "-T", "png", "-o" , png_file.to_str().unwrap()])
                 .output()
                 .expect("failed to generate graph");
             println!("graphviz process status: {}", output.status);
