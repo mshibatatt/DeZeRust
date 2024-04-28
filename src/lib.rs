@@ -1,35 +1,60 @@
+#![allow(dead_code, non_snake_case)]
 pub mod DeZeRust {
     use std::collections::{BinaryHeap, HashSet};
     use std::rc::{Rc, Weak};
     use std::cell::RefCell;
     use std::cmp::{Ord, Ordering};
+    use std::sync::{Arc, Mutex};
 
     type Dtype = f64;
     type Grad = Option<Variable>;
-    static mut ENABLE_BACKPROP: bool = true;
-    static mut RETAIN_GRAD: bool = false;
-    static mut CREATE_SECOND_GRAPH: bool = true;
-
-    unsafe fn config_backprop_on() {
-        ENABLE_BACKPROP = true;
-    }
-    unsafe fn config_backprop_off() {
-        ENABLE_BACKPROP = false;
-    }
-    unsafe fn config_retain_on() {
-        ENABLE_BACKPROP = true;
-    }
-    unsafe fn config_retain_off() {
-        ENABLE_BACKPROP = false;
-    }
-    unsafe fn config_second_graph_on() {
-        CREATE_SECOND_GRAPH = true;
-    }
-    unsafe fn config_second_graph_off() {
-        CREATE_SECOND_GRAPH = false;
-    }
     
-    #[derive(Clone)]
+    // use Singleton: https://qiita.com/kujirahand/items/d7f6bae84a66ab4c783d
+    struct Config {
+        enable_backprop: Mutex<bool>,
+        retain_grad: Mutex<bool>,
+        create_second_graph: Mutex<bool>,
+    }
+    impl Default for Config {
+        fn default() -> Self {
+            Self { 
+                enable_backprop: Mutex::new(true),
+                retain_grad: Mutex::new(false),
+                create_second_graph: Mutex::new(false),
+            }       
+        }
+    }
+    impl Config {
+        pub fn get_instance() -> Arc<Self> {
+            CONFIG_POOL.with(|config| config.clone())
+        }
+
+        pub fn get_enable_backprop() -> bool {
+            *Self::get_instance().enable_backprop.try_lock().unwrap()
+        }
+        pub fn set_enable_backprop(b: bool) {
+            *Self::get_instance().enable_backprop.try_lock().unwrap() = b;
+        }
+        pub fn get_retain_grad() -> bool {
+            *Self::get_instance().retain_grad.try_lock().unwrap()
+        }
+        pub fn set_retain_grad(b: bool) {
+            *Self::get_instance().retain_grad.try_lock().unwrap() = b;
+        }
+        pub fn get_create_second_graph() -> bool {
+            *Self::get_instance().create_second_graph.try_lock().unwrap()
+        }
+        pub fn set_create_second_graph(b: bool) {
+            *Self::get_instance().create_second_graph.try_lock().unwrap() = b;
+        }
+    }
+
+    thread_local! {
+        static CONFIG_POOL: Arc<Config> = Arc::new(Config::default());
+    }
+
+    
+    #[derive(Clone, Debug)]
     pub struct Variable_ {
         data: Dtype,
         name: String,
@@ -63,9 +88,15 @@ pub mod DeZeRust {
         }
     }
 
-    #[derive(Clone)]
+    #[derive(Clone, Debug)]
     pub struct Variable(Rc<RefCell<Variable_>>);
 
+    impl std::fmt::Display for Variable {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "{}({}): {}:{:?}", self.get_name(), self.0.borrow().generation, self.get_data(), self.get_grad_data())?;
+            Ok(())
+        }
+    }
     impl Variable {
         pub fn new(x: Dtype) -> Self {
             let v = Variable_::new(x);
@@ -89,53 +120,46 @@ pub mod DeZeRust {
         }
 
         pub fn backward(&self) {
-            if let None = self.get_grad_data() {
+            if self.get_grad_data().is_none() {
                 self.update_grad(Some(Variable::new(1.0)));
             }
 
             let mut seen = HashSet::new();
             let mut que = BinaryHeap::new();
 
-            let v = self.clone();
-            let creator = &v.0.borrow().creator.clone();
-            if let Some(f) = creator {
-                let listed_f = f.clone();
-                que.push(listed_f);
-                let seen_f = f.clone();
-                seen.insert(seen_f.0.as_ptr());
+            if let Some(f) = &self.0.borrow().creator {
+                que.push(f.clone());
+                seen.insert(f.0.as_ptr());
             }
+
+            let mut switch_config = false;
             while !que.is_empty() {
                 let f = que.pop().unwrap();
 
-                let gys: Vec<Grad> = f.get_output_grad();
-
-                if unsafe { !CREATE_SECOND_GRAPH } & unsafe { ENABLE_BACKPROP } {
-                    unsafe { config_backprop_off(); } 
+                if Config::get_create_second_graph() & !Config::get_enable_backprop() {
+                    Config::set_enable_backprop(true);
+                    switch_config = true;
                 }
 
-                let gxs: Vec<Grad> = f.backward(&gys);
-                let x_back = &f.0.borrow().input;
+                let gxs: Vec<Grad> = f.backward(&f.get_output_grad());
 
-                for (x, gx) in x_back.iter().zip(gxs) {
+                for (x, gx) in f.0.borrow().input.iter().zip(gxs) {
                     x.update_grad(gx);
-                    // println!("{}: {:?}", x.get_name(), x.get_grad_data());
-                    let x_temp = x.0.borrow();
-                    let nxt_creator = x_temp.creator.as_ref(); 
-                    if let Some(g) = nxt_creator {
+
+                    if let Some(g) = &x.0.borrow().creator {
                         if !seen.contains(&g.0.as_ptr()) {
-                            let listed_g = g.clone();
-                            que.push(listed_g);
-                            let seen_g = g.clone();
-                            seen.insert(seen_g.0.as_ptr());
+                            que.push(g.clone());
+                            seen.insert(g.0.as_ptr());
                         }
                     }
                 } 
 
-                if unsafe { CREATE_SECOND_GRAPH } & unsafe { !ENABLE_BACKPROP } {
-                    unsafe { config_backprop_on(); } 
+                if switch_config {
+                    Config::set_enable_backprop(false);
+                    switch_config = false;
                }
 
-                if unsafe { !RETAIN_GRAD } {
+                if !Config::get_retain_grad() {
                     for y in f.0.borrow().output.iter() {
                         y.upgrade().unwrap().as_ref().borrow_mut().clear_grad();
                     }
@@ -146,7 +170,7 @@ pub mod DeZeRust {
         pub fn update_grad(&self, g: Grad) {
             match self.get_grad() {
                 None => self.0.as_ref().borrow_mut().grad = g,
-                Some(d) => self.0.as_ref().borrow_mut().grad = Some(d.get_data() + g.unwrap()),
+                Some(d) => self.0.as_ref().borrow_mut().grad = Some(d + g.unwrap()),
             }
         }
 
@@ -199,7 +223,7 @@ pub mod DeZeRust {
         MSE,
     }
 
-    #[derive(Clone)]
+    #[derive(Clone, Debug)]
     pub struct Function_ {
         ftype: FunctionTypes,
         input: Vec<Variable>,
@@ -207,16 +231,23 @@ pub mod DeZeRust {
         generation: usize,
     }
 
-    #[derive(Clone)]
+    #[derive(Clone, Debug)]
     pub struct Function(Rc<RefCell<Function_>>);
+    
+    impl std::fmt::Display for Function {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "{:?}", self.0.borrow().ftype)?;
+            Ok(())
+        }
+    }
 
     impl Function {
         fn call(ftype: FunctionTypes, input: &Vec<Variable>) -> Vec<Variable> {
             let x = input.iter().map(|v| v.get_data()).collect::<Vec<Dtype>>();
             let y = _forward(&ftype, &x);
-            let output = y.iter().map(|v| Variable::new(*v)).collect::<Vec<Variable>>();
+            let output = y.iter().map(|&v| Variable::new(v)).collect::<Vec<Variable>>();
 
-            if unsafe { ENABLE_BACKPROP } {
+            if Config::get_enable_backprop() {
                 let f = Function_ { 
                     ftype,
                     input: input.clone(), 
@@ -241,58 +272,58 @@ pub mod DeZeRust {
         }
 
         fn backward(&self, dy: &Vec<Grad>) -> Vec<Grad> {
-            let x: Vec<Variable> = self.0.borrow().input.iter().map(|v| v.clone()).collect();
+            let x: &Vec<Variable> = &self.0.borrow().input;
             match self.0.borrow().ftype {
                 FunctionTypes::ADD => {
-                    assert_eq!(x.len(), 2);
-                    assert_eq!(dy.len(), 1);
+                    debug_assert_eq!(x.len(), 2);
+                    debug_assert_eq!(dy.len(), 1);
                     let d = dy[0].clone().unwrap();
                     vec![Some(d.clone()), Some(d.clone())]
                 },
                 FunctionTypes::MUL => {
-                    assert_eq!(x.len(), 2);
-                    assert_eq!(dy.len(), 1);
+                    debug_assert_eq!(x.len(), 2);
+                    debug_assert_eq!(dy.len(), 1);
                     let d = dy[0].clone().unwrap();
                     vec![Some(d.clone()*x[1].clone()), Some(d.clone()*x[0].clone())]
                 },
                 FunctionTypes::SUB => {
-                    assert_eq!(x.len(), 2);
-                    assert_eq!(dy.len(), 1);
+                    debug_assert_eq!(x.len(), 2);
+                    debug_assert_eq!(dy.len(), 1);
                     let d = dy[0].clone().unwrap();
                     vec![Some(d.clone()), Some(-d.clone())]
                 },
                 FunctionTypes::DIV => {
-                    assert_eq!(x.len(), 2);
-                    assert_eq!(dy.len(), 1);
+                    debug_assert_eq!(x.len(), 2);
+                    debug_assert_eq!(dy.len(), 1);
                     let d = dy[0].clone().unwrap();
                     vec![Some(d.clone()/x[1].clone()), Some(-d.clone()*x[0].clone()/(x[1].clone()*x[1].clone()))]
                 },
                 FunctionTypes::SQUARE => {
-                    assert_eq!(x.len(), 1);
-                    assert_eq!(dy.len(), 1);
+                    debug_assert_eq!(x.len(), 1);
+                    debug_assert_eq!(dy.len(), 1);
                     let d = dy[0].clone().unwrap();
                     vec![Some(2.0 * d.clone() * x[0].clone())]
                 },
                 FunctionTypes::EXP => {
-                    assert_eq!(x.len(), 1);
-                    assert_eq!(dy.len(), 1);
+                    debug_assert_eq!(x.len(), 1);
+                    debug_assert_eq!(dy.len(), 1);
                     let d = dy[0].clone().unwrap();
                     vec![Some(d.clone() * x[0].clone().exp())]
                 },
                 FunctionTypes::NEG => {
-                    assert_eq!(x.len(), 1);
-                    assert_eq!(dy.len(), 1);
+                    debug_assert_eq!(x.len(), 1);
+                    debug_assert_eq!(dy.len(), 1);
                     let d = dy[0].clone().unwrap();
                     vec![Some(-d.clone())]
                 },
                 FunctionTypes::SUM => {
-                    assert_eq!(dy.len(), 1);
+                    debug_assert_eq!(dy.len(), 1);
                     let d = dy[0].clone().unwrap();
                     vec![Some(-d.clone()); x.len()]
                 },
                 FunctionTypes::DOT => {
-                    assert_eq!(x.len() % 2, 0);
-                    assert_eq!(x.len() / 2, dy.len());
+                    debug_assert_eq!(x.len() % 2, 0);
+                    debug_assert_eq!(x.len() / 2, dy.len());
                     let center = x.len() / 2 as usize;
                     let mut res: Vec<Grad> = vec![];
                     for i in center..x.len() {
@@ -304,9 +335,9 @@ pub mod DeZeRust {
                     res
                 },
                 FunctionTypes::MSE => {
-                    assert_eq!(dy.len(), 1);
-                    assert_eq!(x.len() % 2, 0);
-                    let center = x.len() / 2 as usize;
+                    debug_assert_eq!(dy.len(), 1);
+                    debug_assert_eq!(x.len() % 2, 0);
+                    let center = x.len() / 2;
                     let mut res: Vec<Grad> = vec![];
                     for i in 0..x.len() {
                         if i < center {
@@ -351,39 +382,39 @@ pub mod DeZeRust {
     fn _forward(ftype: &FunctionTypes, x: &Vec<Dtype>) -> Vec<Dtype> {
         match ftype {
             FunctionTypes::ADD => {
-                assert_eq!(x.len(), 2);
+                debug_assert_eq!(x.len(), 2);
                 vec![x[0] + x[1]]
             },
             FunctionTypes::MUL => {
-                assert_eq!(x.len(), 2);
+                debug_assert_eq!(x.len(), 2);
                 vec![x[0] * x[1]]
             },
             FunctionTypes::SUB => {
-                assert_eq!(x.len(), 2);
+                debug_assert_eq!(x.len(), 2);
                 vec![x[0] - x[1]]
             },
             FunctionTypes::DIV => {
-                assert_eq!(x.len(), 2);
+                debug_assert_eq!(x.len(), 2);
                 vec![x[0] / x[1]]
             },
             FunctionTypes::SQUARE => {
-                assert_eq!(x.len(), 1);
+                debug_assert_eq!(x.len(), 1);
                 vec![x[0] * x[0]]
             },
             FunctionTypes::EXP => {
-                assert_eq!(x.len(), 1);
+                debug_assert_eq!(x.len(), 1);
                 vec![x[0].exp()]
             },
             FunctionTypes::NEG => {
-                assert_eq!(x.len(), 1);
+                debug_assert_eq!(x.len(), 1);
                 vec![-x[0]]
             },
             FunctionTypes::SUM => {
                 vec![x.iter().sum()]
             },
             FunctionTypes::DOT => {
-                assert_eq!(x.len() % 2, 0);
-                let center = x.len() / 2 as usize;
+                debug_assert_eq!(x.len() % 2, 0);
+                let center = x.len() / 2;
                 let mut res = vec![];
                 for i in 0..center {
                     res.push(x[i] * x[i+center]);
@@ -391,8 +422,8 @@ pub mod DeZeRust {
                 res
             },
             FunctionTypes::MSE => {
-                assert_eq!(x.len() % 2, 0);
-                let center = x.len() / 2 as usize;
+                debug_assert_eq!(x.len() % 2, 0);
+                let center = x.len() / 2;
                 let mut res: Dtype = 0.0;
                 for i in 0..center {
                     res += (x[i] - x[i+center])*(x[i] - x[i+center]);
@@ -560,7 +591,7 @@ pub mod DeZeRust {
             let z = square(y.clone());
             z.backward();
             assert_eq!(x.get_grad_data(), Some(108.0));
-            if unsafe { RETAIN_GRAD } {
+            if Config::get_retain_grad() {
                 assert_eq!(y.get_grad_data(), Some(18.0));
             } else {
                 assert_eq!(y.get_grad_data(), None);
@@ -626,24 +657,23 @@ pub mod DeZeRust {
 
         #[test]
         fn test_2nd_defferentiation() {
-            // TODO: fix error in this test
-
-            // unsafe { config_retain_off(); }
             fn f(x: Variable) -> Variable {
-                x.clone().square().square() - 2.0 * x.clone().square()
+                x.clone().square().square() - 2.0*x.clone().square() 
             }
             let x = Variable::new(2.0);
             x.set_name("x");
             let y = f(x.clone());
             y.set_name("y");
+            Config::set_create_second_graph(true);
             y.backward();
-            dot_graph::plot_dot_graph(&y, "second".to_owned());
+            // dot_graph::plot_dot_graph(&y, "second".to_owned());
             assert_eq!(x.get_grad_data(), Some(24.0));
 
             let gx = x.get_grad().unwrap();
             gx.set_name("gx");
-            dot_graph::plot_dot_graph(&gx, "second_d".to_owned());
+            // dot_graph::plot_dot_graph(&gx, "second_d".to_owned());
             x.clear_grad();
+            Config::set_create_second_graph(false);
             gx.backward();
             assert_eq!(x.get_grad_data(), Some(44.0));
         }
@@ -667,7 +697,7 @@ pub mod DeZeRust {
 
         fn dot_var(v: &Variable) -> String {
             let mut dot_var_txt = format!("{}", v.0.as_ptr() as usize);
-            dot_var_txt += &format!(" [label=\"{}\"", v.get_name());
+            dot_var_txt += &format!(" [label=\"{}({})\"", v.get_name(), v.get_data());
             dot_var_txt += ", color=orange, style=filled]\n";
             dot_var_txt
         }
@@ -693,10 +723,8 @@ pub mod DeZeRust {
 
             let creator = &v.0.borrow().creator.clone();
             if let Some(f) = creator {
-                let listed_f = f.clone();
-                que.push(listed_f);
-                let seen_f = f.clone();
-                seen.insert(seen_f.0.as_ptr());
+                que.push(f.clone());
+                seen.insert(f.0.as_ptr());
             }
             txt += &dot_var(v);
 
@@ -707,14 +735,10 @@ pub mod DeZeRust {
 
                 for x in x_back.iter() {
                     txt += &dot_var(x);
-                    let x_temp = x.0.borrow();
-                    let nxt_creator = x_temp.creator.as_ref(); 
-                    if let Some(g) = nxt_creator {
+                    if let Some(g) = &x.0.borrow().creator {
                         if !seen.contains(&g.0.as_ptr()) {
-                            let listed_g = g.clone();
-                            que.push(listed_g);
-                            let seen_g = g.clone();
-                            seen.insert(seen_g.0.as_ptr());
+                            que.push(g.clone());
+                            seen.insert(g.0.as_ptr());
                         }
                     }
                 } 
